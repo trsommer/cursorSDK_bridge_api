@@ -1,3 +1,13 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "cursor-sdk>=0.1.5",
+#     "fastapi>=0.100.0",
+#     "uvicorn>=0.20.0",
+#     "httpx>=0.24.0",
+# ]
+# ///
+
 import os
 import sys
 import json

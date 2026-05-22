@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "cursor-sdk>=0.1.5",
+#     "fastmcp>=3.3.0",
+# ]
+# ///
+
 import os
 import sys
 import logging

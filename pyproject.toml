@@ -1,0 +1,13 @@
+[project]
+name = "cursor-sdk-bridge"
+version = "1.0.0"
+description = "Cursor SDK OpenAI & MCP Bridge"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cursor-sdk>=0.1.5",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "httpx>=0.24.0",
+    "fastmcp>=3.3.0",
+]

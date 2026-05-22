@@ -39,6 +39,10 @@ Start the bridge server in your terminal:
 ```bash
 python3 cursor_bridge_server.py
 ```
+Or using **`uv`** (which automatically installs the required Python version and dependencies defined in `pyproject.toml`):
+```bash
+uv run cursor_bridge_server.py
+```
 By default, the server runs on `http://127.0.0.1:8764`.
 
 ### Exposing to the Local Network
@@ -98,12 +102,16 @@ If you are using a terminal-native client like OpenCode that connects directly t
 ```bash
 python3 mcp_server.py
 ```
+Or using **`uv`**:
+```bash
+uv run mcp_server.py
+```
 This starts an MCP stdio server. You can configure OpenCode or Claude Desktop to start this server by configuring the command:
 ```json
 "mcpServers": {
   "cursor-bridge": {
-    "command": "python3",
-    "args": ["/absolute/path/to/mcp_server.py"],
+    "command": "uv",
+    "args": ["run", "/absolute/path/to/mcp_server.py"],
     "env": {
       "CURSOR_API_KEY": "your_api_key_here",
       "CURSOR_WORKSPACE": "/path/to/your/workspace"
