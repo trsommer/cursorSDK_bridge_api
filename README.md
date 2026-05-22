@@ -24,8 +24,12 @@ Additionally, it provides a standalone Model Context Protocol (MCP) server that 
    ```bash
    cp .env.template .env
    ```
-3. Open `.env` and set your `CURSOR_API_KEY` (retrieve it from the [Cursor Dashboard](https://cursor.com/settings) -> Integrations).
-4. Configure optional parameters like the default `PORT` (defaults to `8764`) and `CURSOR_WORKSPACE` (the workspace root directory you want the agent to edit/read).
+3. Install the dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. Open `.env` and set your `CURSOR_API_KEY` (retrieve it from the [Cursor Dashboard](https://cursor.com/settings) -> Integrations).
+5. Configure optional parameters like the default `PORT` (defaults to `8764`) and `CURSOR_WORKSPACE` (the workspace root directory you want the agent to edit/read).
 
 ---
 
