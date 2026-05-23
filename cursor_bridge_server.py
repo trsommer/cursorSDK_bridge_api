@@ -590,15 +590,11 @@ async def chat_completions(
     
     has_tool_results = False
     
-    # Send delta callback setup
-    loop = asyncio.get_running_loop()
     def on_delta_callback(update):
         if type(update).__name__ in ("ToolCallStartedUpdate", "ToolCallCompletedUpdate", "PartialToolCallUpdate"):
             return
-        loop.call_soon_threadsafe(
-            session.completion_queue.put_nowait,
-            {"type": "delta", "update": update}
-        )
+        # Queue synchronously so deltas are not reordered behind the terminal "done" event.
+        session.completion_queue.put_nowait({"type": "delta", "update": update})
         
     send_options = SendOptions(
         on_delta=on_delta_callback
@@ -697,17 +693,53 @@ async def chat_completions(
         accumulated_text = ""
         accumulated_reasoning = ""
         pending_content: List[str] = []
-        thinking_phase_closed = False
+        held_before_thinking: List[str] = []
+        segment_answer: List[str] = []
+        in_thinking_phase = False
+        saw_thinking = False
+        # When the model streams the full answer before any thinking deltas, hold that
+        # text until the run ends so retrospective thoughts can stream first.
+        content_deferred_until_done = False
+        last_stream_event: Optional[str] = None
+        emitted_content_this_turn = False
         yielded_tool_calls = []
 
-        def close_thinking_phase() -> List[str]:
-            nonlocal thinking_phase_closed
-            if thinking_phase_closed:
-                return []
-            thinking_phase_closed = True
+        def flush_thinking_segment() -> List[str]:
+            """End the current think→answer segment and return buffered answer text."""
+            nonlocal in_thinking_phase
+            in_thinking_phase = False
             pending = pending_content[:]
             pending_content.clear()
             return pending
+
+        def release_held_before_thinking() -> List[str]:
+            held = held_before_thinking[:]
+            held_before_thinking.clear()
+            return held
+
+        def drain_segment_answer() -> List[str]:
+            parts = segment_answer[:]
+            segment_answer.clear()
+            return parts
+
+        def answer_text_chunks(text: str) -> List[str]:
+            nonlocal emitted_content_this_turn, accumulated_text
+            if not text:
+                return []
+            chunks: List[str] = []
+            if emitted_content_this_turn:
+                # Force a new UI block so later answer text is not merged with earlier content.
+                chunks.append(format_chunk(session_id, model_name, role="assistant"))
+            chunks.append(format_chunk(session_id, model_name, content=text))
+            accumulated_text += text
+            emitted_content_this_turn = True
+            return chunks
+
+        def segment_answer_chunks() -> List[str]:
+            out: List[str] = []
+            for part in drain_segment_answer():
+                out.extend(answer_text_chunks(part))
+            return out
         
         # Yield initial role delta chunk
         yield format_chunk(session_id, model_name, role="assistant")
@@ -721,30 +753,62 @@ async def chat_completions(
                     update = event["update"]
 
                     if _is_thinking_completed(update):
-                        for text in close_thinking_phase():
-                            yield format_chunk(session_id, model_name, content=text)
-                            accumulated_text += text
+                        if segment_answer and last_stream_event == "text":
+                            for chunk in segment_answer_chunks():
+                                yield chunk
+                        for text in flush_thinking_segment():
+                            for chunk in answer_text_chunks(text):
+                                yield chunk
+                        if not content_deferred_until_done:
+                            for text in release_held_before_thinking():
+                                for chunk in answer_text_chunks(text):
+                                    yield chunk
+                        last_stream_event = "thinking_completed"
                         continue
 
                     if _is_thinking_delta(update):
+                        if pending_content:
+                            for buffered in flush_thinking_segment():
+                                for chunk in answer_text_chunks(buffered):
+                                    yield chunk
+                        if (
+                            segment_answer
+                            and last_stream_event in ("thinking_completed", "text")
+                        ):
+                            for chunk in segment_answer_chunks():
+                                yield chunk
+                        elif segment_answer and emitted_content_this_turn:
+                            yield format_chunk(session_id, model_name, role="assistant")
+                        if not saw_thinking and held_before_thinking:
+                            content_deferred_until_done = True
+                        saw_thinking = True
+                        in_thinking_phase = True
                         text = getattr(update, "text", "")
                         if text:
                             yield format_chunk(session_id, model_name, reasoning_content=text)
                             accumulated_reasoning += text
+                        last_stream_event = "thinking_delta"
                     elif _is_text_delta(update):
                         text = getattr(update, "text", "")
                         if not text:
                             continue
-                        if thinking_phase_closed:
-                            yield format_chunk(session_id, model_name, content=text)
-                            accumulated_text += text
-                        else:
+                        if in_thinking_phase:
                             pending_content.append(text)
+                        elif not saw_thinking:
+                            held_before_thinking.append(text)
+                        else:
+                            segment_answer.append(text)
+                        last_stream_event = "text"
                             
                 elif event_type == "tool_call":
-                    for text in close_thinking_phase():
-                        yield format_chunk(session_id, model_name, content=text)
-                        accumulated_text += text
+                    for text in flush_thinking_segment():
+                        for chunk in answer_text_chunks(text):
+                            yield chunk
+                    for text in release_held_before_thinking():
+                        for chunk in answer_text_chunks(text):
+                            yield chunk
+                    for chunk in segment_answer_chunks():
+                        yield chunk
 
                     tool_call_id = event["tool_call_id"]
                     tool_name = event["name"]
@@ -830,9 +894,14 @@ async def chat_completions(
                     return
                     
                 elif event_type == "done":
-                    for text in close_thinking_phase():
-                        yield format_chunk(session_id, model_name, content=text)
-                        accumulated_text += text
+                    for text in flush_thinking_segment():
+                        for chunk in answer_text_chunks(text):
+                            yield chunk
+                    for text in release_held_before_thinking():
+                        for chunk in answer_text_chunks(text):
+                            yield chunk
+                    for chunk in segment_answer_chunks():
+                        yield chunk
 
                     result = event.get("result")
                     final_text = getattr(result, "result", "") if result else ""
@@ -840,8 +909,8 @@ async def chat_completions(
                         final_text, accumulated_text, accumulated_reasoning
                     )
                     if remainder:
-                        accumulated_text += remainder
-                        yield format_chunk(session_id, model_name, content=remainder)
+                        for chunk in answer_text_chunks(remainder):
+                            yield chunk
                         
                     assistant_msg = {
                         "role": "assistant",

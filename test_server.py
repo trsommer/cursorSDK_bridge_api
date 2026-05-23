@@ -152,6 +152,38 @@ class MockRun:
                 self._wait_future.set_result(
                     MockRunResult(result="Answer first. More answer.")
                 )
+            elif "interleaved_thinking_no_completed" in self.prompt:
+                if self.on_delta:
+                    self.on_delta(MockThinkingDeltaUpdate("Think 1. "))
+                    self.on_delta(MockTextDeltaUpdate("Answer 1. "))
+                    self.on_delta(MockThinkingDeltaUpdate("Think 2. "))
+                    self.on_delta(MockTextDeltaUpdate("Answer 2. "))
+                self.status = "finished"
+                self._wait_future.set_result(
+                    MockRunResult(result="Answer 1. Answer 2.")
+                )
+            elif "late_thinking_after_answer" in self.prompt:
+                if self.on_delta:
+                    self.on_delta(MockThinkingDeltaUpdate("Plan A. "))
+                    self.on_delta(MockThinkingCompletedUpdate())
+                    self.on_delta(MockTextDeltaUpdate("Final summary for user."))
+                    await asyncio.sleep(0.05)
+                    self.on_delta(MockThinkingDeltaUpdate("Retrospective detail."))
+                    self.on_delta(MockThinkingCompletedUpdate())
+                self.status = "finished"
+                self._wait_future.set_result(MockRunResult(result="Final summary for user."))
+            elif "interleaved_thinking" in self.prompt:
+                if self.on_delta:
+                    self.on_delta(MockThinkingDeltaUpdate("Think 1. "))
+                    self.on_delta(MockThinkingCompletedUpdate())
+                    self.on_delta(MockTextDeltaUpdate("Answer 1. "))
+                    self.on_delta(MockThinkingDeltaUpdate("Think 2. "))
+                    self.on_delta(MockThinkingCompletedUpdate())
+                    self.on_delta(MockTextDeltaUpdate("Answer 2."))
+                self.status = "finished"
+                self._wait_future.set_result(
+                    MockRunResult(result="Answer 1. Answer 2.")
+                )
             else:
                 # Normal text streaming simulation
                 await asyncio.sleep(0.05)
@@ -365,6 +397,75 @@ class TestCursorBridgeServer(unittest.TestCase):
                 if "content" in delta:
                     order.append("content")
         self.assertTrue(order.index("reasoning") < order.index("content"))
+
+    def test_03c_streaming_interleaved_thinking_and_content(self):
+        payload = {
+            "model": "composer-2.5",
+            "messages": [{"role": "user", "content": "interleaved_thinking"}],
+            "stream": True,
+        }
+        with self.client.stream("POST", "/v1/chat/completions", json=payload) as r:
+            self.assertEqual(r.status_code, 200)
+            order = []
+            for line in r.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                content = line[6:]
+                if content == "[DONE]":
+                    break
+                delta = json.loads(content)["choices"][0]["delta"]
+                if "reasoning_content" in delta:
+                    order.append("reasoning")
+                if "content" in delta:
+                    order.append("content")
+        self.assertEqual(order, ["reasoning", "content", "reasoning", "content"])
+
+    def test_03d_streaming_interleaved_without_thinking_completed(self):
+        payload = {
+            "model": "composer-2.5",
+            "messages": [{"role": "user", "content": "interleaved_thinking_no_completed"}],
+            "stream": True,
+        }
+        with self.client.stream("POST", "/v1/chat/completions", json=payload) as r:
+            self.assertEqual(r.status_code, 200)
+            order = []
+            for line in r.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                content = line[6:]
+                if content == "[DONE]":
+                    break
+                delta = json.loads(content)["choices"][0]["delta"]
+                if "reasoning_content" in delta:
+                    order.append("reasoning")
+                if "content" in delta:
+                    order.append("content")
+        self.assertEqual(order, ["reasoning", "content", "reasoning", "content"])
+
+    def test_03e_late_thinking_streams_before_buffered_answer(self):
+        payload = {
+            "model": "composer-2.5",
+            "messages": [{"role": "user", "content": "late_thinking_after_answer"}],
+            "stream": True,
+        }
+        with self.client.stream("POST", "/v1/chat/completions", json=payload) as r:
+            self.assertEqual(r.status_code, 200)
+            order = []
+            for line in r.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                content = line[6:]
+                if content == "[DONE]":
+                    break
+                delta = json.loads(content)["choices"][0]["delta"]
+                if "reasoning_content" in delta:
+                    order.append("reasoning")
+                if "content" in delta:
+                    order.append("content")
+        self.assertIn("reasoning", order)
+        self.assertIn("content", order)
+        # Summary is held until retrospective thinking finishes; answer comes last.
+        self.assertGreater(order.index("content"), order.index("reasoning"))
 
     def test_04_session_resumption_prefix_matching(self):
         session_id = "test-resumption-sess"
