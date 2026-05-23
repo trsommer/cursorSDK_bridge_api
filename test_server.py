@@ -23,6 +23,10 @@ class MockThinkingDeltaUpdate:
     def __init__(self, text):
         self.text = text
 
+class MockThinkingCompletedUpdate:
+    type = "thinking-completed"
+    thinking_duration_ms = 0
+
 class MockToolCallStartedUpdate:
     pass
 
@@ -31,11 +35,13 @@ class MockTurnEndedUpdate:
 
 mock_sdk.TextDeltaUpdate = MockTextDeltaUpdate
 mock_sdk.ThinkingDeltaUpdate = MockThinkingDeltaUpdate
+mock_sdk.ThinkingCompletedUpdate = MockThinkingCompletedUpdate
 mock_sdk.ToolCallStartedUpdate = MockToolCallStartedUpdate
 mock_sdk.TurnEndedUpdate = MockTurnEndedUpdate
 
 mock_events.TextDeltaUpdate = MockTextDeltaUpdate
 mock_events.ThinkingDeltaUpdate = MockThinkingDeltaUpdate
+mock_events.ThinkingCompletedUpdate = MockThinkingCompletedUpdate
 mock_events.ToolCallStartedUpdate = MockToolCallStartedUpdate
 mock_events.TurnEndedUpdate = MockTurnEndedUpdate
 
@@ -135,12 +141,24 @@ class MockRun:
                     self.on_delta(MockTextDeltaUpdate(f"Tool returned: {tool_result}"))
                 self.status = "finished"
                 self._wait_future.set_result(MockRunResult(result=f"Tool result received: {tool_result}"))
+            elif "out_of_order_thinking" in self.prompt:
+                if self.on_delta:
+                    self.on_delta(MockTextDeltaUpdate("Answer first. "))
+                    await asyncio.sleep(0.05)
+                    self.on_delta(MockThinkingDeltaUpdate("Late thinking."))
+                    self.on_delta(MockThinkingCompletedUpdate())
+                    self.on_delta(MockTextDeltaUpdate("More answer."))
+                self.status = "finished"
+                self._wait_future.set_result(
+                    MockRunResult(result="Answer first. More answer.")
+                )
             else:
                 # Normal text streaming simulation
                 await asyncio.sleep(0.05)
                 if self.on_delta:
                     self.on_delta(MockThinkingDeltaUpdate("Thinking about greeting..."))
                     await asyncio.sleep(0.05)
+                    self.on_delta(MockThinkingCompletedUpdate())
                     self.on_delta(MockTextDeltaUpdate("Hello! "))
                     await asyncio.sleep(0.05)
                     self.on_delta(MockTextDeltaUpdate("I am a mock agent."))
@@ -290,6 +308,7 @@ class TestCursorBridgeServer(unittest.TestCase):
             
             chunks = []
             reasoning_chunks = []
+            stream_order = []
             has_role_assistant = False
             first_chunk = True
             
@@ -308,8 +327,10 @@ class TestCursorBridgeServer(unittest.TestCase):
                             
                     if "content" in delta:
                         chunks.append(delta["content"])
+                        stream_order.append("content")
                     if "reasoning_content" in delta:
                         reasoning_chunks.append(delta["reasoning_content"])
+                        stream_order.append("reasoning")
             
             full_text = "".join(chunks)
             full_reasoning = "".join(reasoning_chunks)
@@ -317,6 +338,33 @@ class TestCursorBridgeServer(unittest.TestCase):
             self.assertTrue(has_role_assistant, "First chunk should declare the assistant role")
             self.assertIn("Thinking about greeting...", full_reasoning)
             self.assertEqual("Hello! I am a mock agent.", full_text)
+            self.assertLess(
+                stream_order.index("reasoning"),
+                stream_order.index("content"),
+                msg="reasoning chunks must be streamed before content chunks",
+            )
+
+    def test_03b_streaming_reasoning_before_content_when_text_arrives_first(self):
+        payload = {
+            "model": "composer-2.5",
+            "messages": [{"role": "user", "content": "out_of_order_thinking"}],
+            "stream": True,
+        }
+        with self.client.stream("POST", "/v1/chat/completions", json=payload) as r:
+            self.assertEqual(r.status_code, 200)
+            order = []
+            for line in r.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                content = line[6:]
+                if content == "[DONE]":
+                    break
+                delta = json.loads(content)["choices"][0]["delta"]
+                if "reasoning_content" in delta:
+                    order.append("reasoning")
+                if "content" in delta:
+                    order.append("content")
+        self.assertTrue(order.index("reasoning") < order.index("content"))
 
     def test_04_session_resumption_prefix_matching(self):
         session_id = "test-resumption-sess"

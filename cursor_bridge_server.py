@@ -38,6 +38,7 @@ try:
     from cursor_sdk.events import (
         TextDeltaUpdate,
         ThinkingDeltaUpdate,
+        ThinkingCompletedUpdate,
         ToolCallStartedUpdate,
         TurnEndedUpdate
     )
@@ -45,6 +46,7 @@ except ImportError:
     from cursor_sdk import (
         TextDeltaUpdate,
         ThinkingDeltaUpdate,
+        ThinkingCompletedUpdate,
         ToolCallStartedUpdate,
         TurnEndedUpdate
     )
@@ -265,6 +267,42 @@ def format_chunk(
     if tool_calls is not None:
         chunk["choices"][0]["delta"]["tool_calls"] = tool_calls
     return f"data: {json.dumps(chunk)}\n\n"
+
+def _is_thinking_delta(update: Any) -> bool:
+    return "ThinkingDelta" in type(update).__name__ or isinstance(update, ThinkingDeltaUpdate)
+
+def _is_text_delta(update: Any) -> bool:
+    return "TextDelta" in type(update).__name__ or isinstance(update, TextDeltaUpdate)
+
+def _is_thinking_completed(update: Any) -> bool:
+    if "ThinkingCompleted" in type(update).__name__ or isinstance(update, ThinkingCompletedUpdate):
+        return True
+    return getattr(update, "type", None) == "thinking-completed"
+
+def _final_content_remainder(
+    final_text: str,
+    accumulated_text: str,
+    accumulated_reasoning: str,
+) -> str:
+    """Return only assistant answer text not already streamed; skip reasoning replay."""
+    if not final_text:
+        return ""
+    if accumulated_text:
+        if final_text.startswith(accumulated_text):
+            remainder = final_text[len(accumulated_text):]
+        elif accumulated_text in final_text:
+            remainder = final_text.split(accumulated_text, 1)[1]
+        else:
+            remainder = ""
+    else:
+        remainder = final_text
+    if not remainder.strip():
+        return ""
+    if accumulated_reasoning:
+        rem = remainder.strip()
+        if rem in accumulated_reasoning or accumulated_reasoning.strip() in remainder:
+            return ""
+    return remainder
 
 async def run_waiter(run, session: AgentSession):
     try:
@@ -658,7 +696,18 @@ async def chat_completions(
 
         accumulated_text = ""
         accumulated_reasoning = ""
+        pending_content: List[str] = []
+        thinking_phase_closed = False
         yielded_tool_calls = []
+
+        def close_thinking_phase() -> List[str]:
+            nonlocal thinking_phase_closed
+            if thinking_phase_closed:
+                return []
+            thinking_phase_closed = True
+            pending = pending_content[:]
+            pending_content.clear()
+            return pending
         
         # Yield initial role delta chunk
         yield format_chunk(session_id, model_name, role="assistant")
@@ -670,22 +719,33 @@ async def chat_completions(
                 
                 if event_type == "delta":
                     update = event["update"]
-                    update_type_name = type(update).__name__
-                    is_thinking = "ThinkingDelta" in update_type_name or isinstance(update, ThinkingDeltaUpdate)
-                    is_text = "TextDelta" in update_type_name or isinstance(update, TextDeltaUpdate)
-                    
-                    if is_thinking:
+
+                    if _is_thinking_completed(update):
+                        for text in close_thinking_phase():
+                            yield format_chunk(session_id, model_name, content=text)
+                            accumulated_text += text
+                        continue
+
+                    if _is_thinking_delta(update):
                         text = getattr(update, "text", "")
                         if text:
                             yield format_chunk(session_id, model_name, reasoning_content=text)
                             accumulated_reasoning += text
-                    elif is_text:
+                    elif _is_text_delta(update):
                         text = getattr(update, "text", "")
-                        if text:
+                        if not text:
+                            continue
+                        if thinking_phase_closed:
                             yield format_chunk(session_id, model_name, content=text)
                             accumulated_text += text
+                        else:
+                            pending_content.append(text)
                             
                 elif event_type == "tool_call":
+                    for text in close_thinking_phase():
+                        yield format_chunk(session_id, model_name, content=text)
+                        accumulated_text += text
+
                     tool_call_id = event["tool_call_id"]
                     tool_name = event["name"]
                     tool_args = event["arguments"]
@@ -770,18 +830,18 @@ async def chat_completions(
                     return
                     
                 elif event_type == "done":
+                    for text in close_thinking_phase():
+                        yield format_chunk(session_id, model_name, content=text)
+                        accumulated_text += text
+
                     result = event.get("result")
                     final_text = getattr(result, "result", "") if result else ""
-                    if final_text and len(final_text) > len(accumulated_text):
-                        if final_text.startswith(accumulated_text):
-                            remainder = final_text[len(accumulated_text):]
-                        elif accumulated_text in final_text:
-                            remainder = final_text.split(accumulated_text, 1)[1]
-                        else:
-                            remainder = final_text if not accumulated_text else ""
-                        if remainder:
-                            accumulated_text += remainder
-                            yield format_chunk(session_id, model_name, content=remainder)
+                    remainder = _final_content_remainder(
+                        final_text, accumulated_text, accumulated_reasoning
+                    )
+                    if remainder:
+                        accumulated_text += remainder
+                        yield format_chunk(session_id, model_name, content=remainder)
                         
                     assistant_msg = {
                         "role": "assistant",
