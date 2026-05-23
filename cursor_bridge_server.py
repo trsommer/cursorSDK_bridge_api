@@ -222,7 +222,14 @@ def map_model(openai_model: str) -> Any:
 async def get_client_for_workspace(workspace: str) -> AsyncClient:
     if workspace not in clients:
         logger.info(f"Launching Cursor bridge client for workspace: {workspace}")
-        os.makedirs(workspace, exist_ok=True)
+        try:
+            os.makedirs(workspace, exist_ok=True)
+        except Exception as e:
+            fallback = os.path.abspath(os.getcwd())
+            logger.warning(f"Could not create workspace path '{workspace}' ({e}). Falling back to '{fallback}'")
+            workspace = fallback
+            if workspace in clients:
+                return clients[workspace]
         client = await AsyncClient.launch_bridge(workspace=workspace)
         clients[workspace] = client
     return clients[workspace]
@@ -449,10 +456,11 @@ async def chat_completions(
             "body": body
         }
         ua = request.headers.get("user-agent", "").lower()
+        server_dir = os.path.dirname(os.path.abspath(__file__))
         if "opencode" in ua:
-            log_path = "/Users/trsommer/Documents/cursorSDK_bridge_api/last_request_opencode.log"
+            log_path = os.path.join(server_dir, "last_request_opencode.log")
         else:
-            log_path = "/Users/trsommer/Documents/cursorSDK_bridge_api/last_request.log"
+            log_path = os.path.join(server_dir, "last_request.log")
         with open(log_path, "w") as f:
             json.dump(req_log, f, indent=2)
     except Exception as e:
@@ -471,6 +479,15 @@ async def chat_completions(
     extracted_ws = extract_workspace_from_messages(incoming_messages)
     workspace = x_workspace_path or extracted_ws or os.environ.get("CURSOR_WORKSPACE") or os.getcwd()
     workspace = os.path.abspath(workspace)
+    
+    # Validate and fallback if workspace is not writeable/accessible (e.g. cross-platform Mac/Linux paths)
+    try:
+        os.makedirs(workspace, exist_ok=True)
+    except Exception as e:
+        fallback_ws = os.path.abspath(os.getcwd())
+        logger.warning(f"Could not access workspace directory '{workspace}' ({e}). Falling back to '{fallback_ws}'")
+        workspace = fallback_ws
+
     logger.info(
         f"Workspace Resolution -> Final: {workspace} | "
         f"x_workspace_path: {x_workspace_path} | "
