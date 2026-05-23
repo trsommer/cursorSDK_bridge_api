@@ -9,7 +9,7 @@ Additionally, it provides a standalone Model Context Protocol (MCP) server that 
 ## Key Features
 
 1. **OpenAI Compatibility**: Serves `/v1/chat/completions` supporting both streaming (`stream=True`) and non-streaming modes.
-2. **First-Class Reasoning/Thinking Support**: Streams reasoning content token-by-token using the standard OpenAI/DeepSeek `reasoning_content` delta property. Ensures mutual exclusion between reasoning and text response phases for clean, collapsible thinking block rendering in modern clients like OpenCode.
+2. **First-Class Reasoning/Thinking Support**: Streams reasoning via `reasoning_content` and answer text via `content`, ordered using the Cursor SDK’s canonical `thinkingMessage` / `assistantMessage` conversation steps (with token deltas only as a fallback). Supports interleaved think→answer→think→answer turns and inserts a fresh `role: assistant` chunk between segments so OpenCode does not merge separate answer blocks.
 3. **Stateful Conversation Resumption**: Integrates message-prefix matching and custom session tracking to automatically resume local Cursor Agents (`Agent.resume()`) for multi-turn chats.
 4. **Tool Call Interception Bridge**: Seamlessly translates OpenAI tool definitions (`tools` parameters) into dynamic MCP tool listings for the Cursor Agent. It intercepts agent tool call invocations, suspends the execution loop, yields the tool calls to the client, and resumes the agent upon receiving results.
 5. **Custom Workspace Pathing**: Dynamically matches host workspaces via environment variable (`CURSOR_WORKSPACE`), content block extraction, or custom HTTP request header (`X-Workspace-Path`).

@@ -27,6 +27,26 @@ class MockThinkingCompletedUpdate:
     type = "thinking-completed"
     thinking_duration_ms = 0
 
+class MockThinkingMessage:
+    def __init__(self, text):
+        self.text = text
+
+class MockAssistantMessage:
+    def __init__(self, text):
+        self.text = text
+
+class MockThinkingConversationStep:
+    type = "thinkingMessage"
+
+    def __init__(self, text):
+        self.message = MockThinkingMessage(text)
+
+class MockAssistantConversationStep:
+    type = "assistantMessage"
+
+    def __init__(self, text):
+        self.message = MockAssistantMessage(text)
+
 class MockToolCallStartedUpdate:
     pass
 
@@ -36,12 +56,16 @@ class MockTurnEndedUpdate:
 mock_sdk.TextDeltaUpdate = MockTextDeltaUpdate
 mock_sdk.ThinkingDeltaUpdate = MockThinkingDeltaUpdate
 mock_sdk.ThinkingCompletedUpdate = MockThinkingCompletedUpdate
+mock_sdk.ThinkingConversationStep = MockThinkingConversationStep
+mock_sdk.AssistantConversationStep = MockAssistantConversationStep
 mock_sdk.ToolCallStartedUpdate = MockToolCallStartedUpdate
 mock_sdk.TurnEndedUpdate = MockTurnEndedUpdate
 
 mock_events.TextDeltaUpdate = MockTextDeltaUpdate
 mock_events.ThinkingDeltaUpdate = MockThinkingDeltaUpdate
 mock_events.ThinkingCompletedUpdate = MockThinkingCompletedUpdate
+mock_events.ThinkingConversationStep = MockThinkingConversationStep
+mock_events.AssistantConversationStep = MockAssistantConversationStep
 mock_events.ToolCallStartedUpdate = MockToolCallStartedUpdate
 mock_events.TurnEndedUpdate = MockTurnEndedUpdate
 
@@ -58,6 +82,7 @@ class MockHttpMcpServerConfig:
 class MockSendOptions:
     def __init__(self, **kwargs):
         self.on_delta = kwargs.get("on_delta")
+        self.on_step = kwargs.get("on_step")
 
 class MockAgentOptions:
     def __init__(self, **kwargs):
@@ -79,15 +104,25 @@ class MockRunResult:
 
 # Mock Run
 class MockRun:
-    def __init__(self, agent, prompt, on_delta):
+    def __init__(self, agent, prompt, on_delta, on_step=None):
         self.agent = agent
         self.prompt = prompt
         self.on_delta = on_delta
+        self.on_step = on_step
         self.status = "running"
         self._wait_future = asyncio.Future()
         
         # Start a background task to simulate agent logic
         asyncio.create_task(self._simulate())
+
+    def _emit_steps(self, pairs):
+        if not self.on_step:
+            return
+        for kind, text in pairs:
+            if kind == "thinking":
+                self.on_step(MockThinkingConversationStep(text))
+            else:
+                self.on_step(MockAssistantConversationStep(text))
 
     async def _simulate(self):
         try:
@@ -142,57 +177,71 @@ class MockRun:
                 self.status = "finished"
                 self._wait_future.set_result(MockRunResult(result=f"Tool result received: {tool_result}"))
             elif "out_of_order_thinking" in self.prompt:
+                self._emit_steps([
+                    ("thinking", "Late thinking."),
+                    ("assistant", "Answer first. More answer."),
+                ])
                 if self.on_delta:
                     self.on_delta(MockTextDeltaUpdate("Answer first. "))
-                    await asyncio.sleep(0.05)
                     self.on_delta(MockThinkingDeltaUpdate("Late thinking."))
-                    self.on_delta(MockThinkingCompletedUpdate())
                     self.on_delta(MockTextDeltaUpdate("More answer."))
                 self.status = "finished"
                 self._wait_future.set_result(
                     MockRunResult(result="Answer first. More answer.")
                 )
             elif "interleaved_thinking_no_completed" in self.prompt:
+                self._emit_steps([
+                    ("thinking", "Think 1. "),
+                    ("assistant", "Answer 1. "),
+                    ("thinking", "Think 2. "),
+                    ("assistant", "Answer 2."),
+                ])
                 if self.on_delta:
                     self.on_delta(MockThinkingDeltaUpdate("Think 1. "))
                     self.on_delta(MockTextDeltaUpdate("Answer 1. "))
                     self.on_delta(MockThinkingDeltaUpdate("Think 2. "))
-                    self.on_delta(MockTextDeltaUpdate("Answer 2. "))
+                    self.on_delta(MockTextDeltaUpdate("Answer 2."))
                 self.status = "finished"
                 self._wait_future.set_result(
                     MockRunResult(result="Answer 1. Answer 2.")
                 )
             elif "late_thinking_after_answer" in self.prompt:
+                self._emit_steps([
+                    ("thinking", "Plan A. "),
+                    ("assistant", "Final summary for user."),
+                    ("thinking", "Retrospective detail."),
+                ])
                 if self.on_delta:
                     self.on_delta(MockThinkingDeltaUpdate("Plan A. "))
-                    self.on_delta(MockThinkingCompletedUpdate())
                     self.on_delta(MockTextDeltaUpdate("Final summary for user."))
-                    await asyncio.sleep(0.05)
                     self.on_delta(MockThinkingDeltaUpdate("Retrospective detail."))
-                    self.on_delta(MockThinkingCompletedUpdate())
                 self.status = "finished"
                 self._wait_future.set_result(MockRunResult(result="Final summary for user."))
             elif "interleaved_thinking" in self.prompt:
+                self._emit_steps([
+                    ("thinking", "Think 1. "),
+                    ("assistant", "Answer 1. "),
+                    ("thinking", "Think 2. "),
+                    ("assistant", "Answer 2."),
+                ])
                 if self.on_delta:
                     self.on_delta(MockThinkingDeltaUpdate("Think 1. "))
-                    self.on_delta(MockThinkingCompletedUpdate())
                     self.on_delta(MockTextDeltaUpdate("Answer 1. "))
                     self.on_delta(MockThinkingDeltaUpdate("Think 2. "))
-                    self.on_delta(MockThinkingCompletedUpdate())
                     self.on_delta(MockTextDeltaUpdate("Answer 2."))
                 self.status = "finished"
                 self._wait_future.set_result(
                     MockRunResult(result="Answer 1. Answer 2.")
                 )
             else:
-                # Normal text streaming simulation
                 await asyncio.sleep(0.05)
+                self._emit_steps([
+                    ("thinking", "Thinking about greeting..."),
+                    ("assistant", "Hello! I am a mock agent."),
+                ])
                 if self.on_delta:
                     self.on_delta(MockThinkingDeltaUpdate("Thinking about greeting..."))
-                    await asyncio.sleep(0.05)
-                    self.on_delta(MockThinkingCompletedUpdate())
                     self.on_delta(MockTextDeltaUpdate("Hello! "))
-                    await asyncio.sleep(0.05)
                     self.on_delta(MockTextDeltaUpdate("I am a mock agent."))
                 self.status = "finished"
                 self._wait_future.set_result(MockRunResult(result="Hello! I am a mock agent."))
@@ -223,7 +272,8 @@ class MockAgent:
         
     async def send(self, prompt, options=None):
         on_delta = options.on_delta if options else None
-        return MockRun(self, prompt, on_delta)
+        on_step = options.on_step if options else None
+        return MockRun(self, prompt, on_delta, on_step)
         
     async def close(self):
         pass
@@ -464,8 +514,8 @@ class TestCursorBridgeServer(unittest.TestCase):
                     order.append("content")
         self.assertIn("reasoning", order)
         self.assertIn("content", order)
-        # Summary is held until retrospective thinking finishes; answer comes last.
-        self.assertGreater(order.index("content"), order.index("reasoning"))
+        # Steps: plan thought, answer, retrospective thought.
+        self.assertEqual(order, ["reasoning", "content", "reasoning"])
 
     def test_04_session_resumption_prefix_matching(self):
         session_id = "test-resumption-sess"
